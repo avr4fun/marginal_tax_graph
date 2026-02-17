@@ -223,5 +223,6 @@ if show_irmaa:
             bbox=dict(facecolor='white', alpha=0.7, edgecolor='red', pad=2)
         )
 
+
 st.pyplot(fig)
 
