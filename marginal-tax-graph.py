@@ -157,8 +157,15 @@ ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
 ax.legend(loc='upper right', ncol=3)
 ax.grid(axis='y', alpha=0.3)
 
+# === UPDATED IRMAA CODE STARTS HERE ===
 if show_irmaa:
-    for tier in DATA_2026[st_status]["irmaa"]:
-        ax.axvline(tier, color='red', alpha=0.3, ls=':')
+    irmaa_list = DATA_2026[st_status]["irmaa"]
+    next_irmaa = next((tier for tier in irmaa_list if tier > wages), None)
+    if next_irmaa:
+        ax.axvline(next_irmaa, color='red', alpha=0.3, ls=':')
+        ax.text(next_irmaa, 2, f"${next_irmaa:,.0f}",
+                ha='center', va='bottom', color='red', fontsize=9, fontweight='bold',
+                bbox=dict(facecolor='white', alpha=0.7, edgecolor='red', pad=2))
 
 st.pyplot(fig)
+
