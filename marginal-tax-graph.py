@@ -218,7 +218,7 @@ if show_irmaa:
     if next_irmaa is not None and next_irmaa <= max_x:  # Only draw if visible on the graph
         ax.axvline(next_irmaa, color='red', alpha=0.3, ls=':')
         ax.text(
-            next_irmaa, 2, f"${next_irmaa:,.0f}",
+            next_irmaa, 2, f"IRMAA\n${next_irmaa:,.0f}",
             ha='center', va='bottom', color='red', fontsize=9, fontweight='bold',
             bbox=dict(facecolor='white', alpha=0.7, edgecolor='red', pad=2)
         )
