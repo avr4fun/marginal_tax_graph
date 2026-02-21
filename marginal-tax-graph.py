@@ -184,7 +184,6 @@ st.sidebar.metric("Effective Tax Rate", f"{eff_rate:.1f}%")
 st.sidebar.markdown("---")
 # Additional sidebar details
 st.sidebar.write(f"**Taxable SS:** ${ss_f:,.0f} ({ss_percent:.1f}%)")
-st.sidebar.write(f"**Deduction:** ${ded_f:,.0f}")
 
 senior_note = ""
 if is_senior and sd_f == 0:
@@ -194,6 +193,7 @@ if is_senior and sd_f == 0:
         senior_note = " (Phased Out)"
 
 st.sidebar.write(f"**Senior Deduction Allowed:** ${sd_f:,.0f}{senior_note}")
+st.sidebar.write(f"**Total Deduction:** ${ded_f:,.0f}")
 st.sidebar.write(f"**Capital Gains Marginal Rate:** {ltcg_rate_f:.0f}%")
 st.sidebar.write(f"**Capital Gains Effective Rate:** {((ltcg_f + niit_f)/ltcg_input*100 if ltcg_input > 0 else 0):.1f}%")
 
