@@ -64,15 +64,16 @@ def get_tax_details(wages, ltcg, ss, status, senior):
 
     Returns:
         ord_tax (float): Tax on ordinary income
-        l_tax (float): Tax on long-term capital gains
+        ltcg_tax (float): Tax on long-term capital gains
         niit (float): Net Investment Income Tax
         taxable_ss (float): Taxable portion of SS
-        current_ord_rate (float): Top ordinary marginal rate
-        current_ltcg_rate (float): Top LTCG marginal rate
+        max_ord_rate (float): Top ordinary marginal rate
+        max_ltcg_rate (float): Top LTCG marginal rate
         sd_used (float): Senior deduction claimed
     """
     c = DATA_2026[status]
 
+    # sd_used: The senior deduction value used, which may be reduced by a phase-out based on income.
     sd_used = 0
     if senior:
         # 6% phase-out of the senior deduction above the threshold
@@ -82,32 +83,42 @@ def get_tax_details(wages, ltcg, ss, status, senior):
     deduction = c["std"] + sd_used  # total deduction
     prov = wages + ltcg + (0.5 * ss)  # provisional income for SS taxation
     t1, t2 = c["ss_t"]
+    
+    # taxable_ss: The amount of Social Security included in taxable income, determined by provisional income thresholds.
     taxable_ss = 0
     if prov > t2: 
         taxable_ss = min(0.85 * ss, (prov - t2) * 0.85 + min(6000 if status == "Married Filing Jointly" else 4500, 0.5 * ss))
     elif prov > t1: 
         taxable_ss = min(0.5 * ss, (prov - t1) * 0.5)
     
+    # ord_tax: Calculated by applying ordinary income tax brackets to taxable ordinary income (Wages + Taxable SS - Deduction).
     t_ord_inc = max(0, (wages + taxable_ss) - deduction)  # taxed as ordinary income
     ord_tax = 0
-    current_ord_rate = 0
+    
+    # max_ord_rate: The marginal tax rate of the highest ordinary income bracket reached.
+    max_ord_rate = 0
     for low, high, rate in c["ord"]:
         if t_ord_inc > low:
             ord_tax += (min(t_ord_inc, high) - low) * (rate / 100)
-            current_ord_rate = rate
+            max_ord_rate = rate
     
+    # ltcg_tax: Calculated by applying capital gains brackets to the LTCG portion, which sits on top of ordinary income.
     t_total = max(0, (wages + taxable_ss + ltcg) - deduction)
     l_portion = max(0, t_total - t_ord_inc)  # amount taxed as LTCG
-    l_tax = 0
-    current_ltcg_rate = 0
+    ltcg_tax = 0
+
+    # max_ltcg_rate: The marginal tax rate of the highest capital gains bracket reached.
+    max_ltcg_rate = 0
     for low, high, rate in c["ltcg"]:
         overlap = max(0, min(t_ord_inc + l_portion, high) - max(t_ord_inc, low))
-        l_tax += overlap * (rate / 100)
+        ltcg_tax += overlap * (rate / 100)
         if (t_ord_inc + l_portion) > low:
-            current_ltcg_rate = rate
+            max_ltcg_rate = rate
     
-    niit = max(0, (wages + ltcg - c["niit"]) * 0.038)  # Net Investment Income Tax if above threshold
-    return ord_tax, l_tax, niit, taxable_ss, current_ord_rate, current_ltcg_rate, sd_used
+    # niit_tax: Calculated as 3.8% of the amount by which (Wages + LTCG) exceeds the NIIT threshold.
+    niit_tax = max(0, (wages + ltcg - c["niit"]) * 0.038)  # Net Investment Income Tax if above threshold
+
+    return ord_tax, ltcg_tax, niit_tax, taxable_ss, max_ord_rate, max_ltcg_rate, sd_used
 
 # --- STREAMLIT APP CONFIGURATION ---
 st.set_page_config(page_title="2026 Tax Analyzer", layout="wide")
@@ -136,8 +147,8 @@ show_irmaa = st.sidebar.checkbox("Show IRMAA Lines", value=True)
 
 # --- TAX CALCULATIONS FOR CURRENT SCENARIO ---
 # Compute taxes for sidebar metrics and graph
-o_f, l_f, n_f, ss_f, br_f, lr_f, sd_f = get_tax_details(wages, ltcg_input, ss_income, st_status, is_senior)
-total_tax = o_f + l_f + n_f  # total tax liability
+ord_f, ltcg_f, niit_f, ss_f, ord_rate_f, ltcg_rate_f, sd_f = get_tax_details(wages, ltcg_input, ss_income, st_status, is_senior)
+total_tax = ord_f + ltcg_f + niit_f  # total tax liability
 total_in = wages + ltcg_input + ss_income  # total income
 eff_rate = (total_tax / total_in * 100) if total_in > 0 else 0  # effective tax rate
 ss_percent = (ss_f / ss_income * 100) if ss_income > 0 else 0  # percent of SS that is taxable
@@ -153,8 +164,8 @@ st.sidebar.write(f"**Taxable SS:** ${ss_f:,.0f} ({ss_percent:.1f}%)")
 st.sidebar.write(f"**Standard Deduction:** ${DATA_2026[st_status]['std']:,.0f}")
 st.sidebar.write(f"**Taxable Social Security:** ${ss_f:,.0f}")
 st.sidebar.write(f"**Senior Deduction Allowed:** ${sd_f:,.0f}")
-st.sidebar.write(f"**Capital Gains Marginal Rate:** {lr_f:.0f}%")
-st.sidebar.write(f"**Capital Gains Effective Rate:** {((l_f + n_f)/ltcg_input*100 if ltcg_input > 0 else 0):.1f}%")
+st.sidebar.write(f"**Capital Gains Marginal Rate:** {ltcg_rate_f:.0f}%")
+st.sidebar.write(f"**Capital Gains Effective Rate:** {((ltcg_f + niit_f)/ltcg_input*100 if ltcg_input > 0 else 0):.1f}%")
 
 # --- DATA GENERATION FOR PLOT ---
 # Determine X range for plotting
@@ -238,4 +249,3 @@ if show_irmaa:
         )
 
 st.pyplot(fig)
-
