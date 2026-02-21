@@ -46,12 +46,12 @@ def update_defaults():
 
 # --- SESSION STATE INITIALIZATION ---
 # If 'wages' is not initialized in Streamlit session state, 
-# initialize it to the married joint standard deduction as default.
+# initialize it to $50000 as a default starting point. This allows the wage input to be programmatically updated when the filing status changes.
 if "wages" not in st.session_state:
     st.session_state["wages"] = 50000.0
 
 # --- TAX CALCULATION FUNCTION ---
-def get_tax_details(wages, ltcg, ss, status, senior):
+def get_tax_details(wages, ltcg, ss, status, senior, use_std_deduction, itemized_deduction):
     """
     Compute all derived tax details for a given scenario.
 
@@ -61,26 +61,44 @@ def get_tax_details(wages, ltcg, ss, status, senior):
         ss (float): Social Security annual income
         status (str): Filing status ("Single" or "Married Filing Jointly")
         senior (bool): Whether taxpayer is 65 or older
+        use_std_deduction (bool): True if using standard deduction.
+        itemized_deduction (float): Value of itemized deductions if not using standard.
 
     Returns:
         ord_tax (float): Tax on ordinary income
         ltcg_tax (float): Tax on long-term capital gains
-        niit (float): Net Investment Income Tax
+        niit_tax (float): Net Investment Income Tax
         taxable_ss (float): Taxable portion of SS
-        max_ord_rate (float): Top ordinary marginal rate
-        max_ltcg_rate (float): Top LTCG marginal rate
+        current_ord_rate (float): Top ordinary marginal rate
+        current_ltcg_rate (float): Top LTCG marginal rate
         sd_used (float): Senior deduction claimed
+        deduction (float): Total deduction used
     """
     c = DATA_2026[status]
 
     # sd_used: The senior deduction value used, which may be reduced by a phase-out based on income.
-    sd_used = 0
+    # This is only applicable if taking the standard deduction.
+    potential_sd_used = 0
     if senior:
         # 6% phase-out of the senior deduction above the threshold
         phase_out = max(0, (wages + ltcg - c["phaseout_start"]) * 0.06)
-        sd_used = max(0, c["senior_deduction"] - phase_out)
+        potential_sd_used = max(0, c["senior_deduction"] - phase_out)
     
-    deduction = c["std"] + sd_used  # total deduction
+    total_std_deduction = c["std"] + potential_sd_used
+    
+    sd_used = 0  # This will be the final value returned
+    if use_std_deduction:
+        deduction = total_std_deduction
+        sd_used = potential_sd_used
+    else:
+        # User is considering itemizing. They will take the greater of standard or itemized.
+        if itemized_deduction > total_std_deduction:
+            deduction = itemized_deduction
+            sd_used = 0  # Itemizing, so no senior standard deduction is used.
+        else:
+            deduction = total_std_deduction
+            sd_used = potential_sd_used  # Taking standard deduction as it's higher.
+
     prov = wages + ltcg + (0.5 * ss)  # provisional income for SS taxation
     t1, t2 = c["ss_t"]
     
@@ -95,30 +113,30 @@ def get_tax_details(wages, ltcg, ss, status, senior):
     t_ord_inc = max(0, (wages + taxable_ss) - deduction)  # taxed as ordinary income
     ord_tax = 0
     
-    # max_ord_rate: The marginal tax rate of the highest ordinary income bracket reached.
-    max_ord_rate = 0
+    # current_ord_rate: The marginal tax rate of the highest ordinary income bracket reached.
+    current_ord_rate = 0
     for low, high, rate in c["ord"]:
         if t_ord_inc > low:
             ord_tax += (min(t_ord_inc, high) - low) * (rate / 100)
-            max_ord_rate = rate
+            current_ord_rate = rate
     
     # ltcg_tax: Calculated by applying capital gains brackets to the LTCG portion, which sits on top of ordinary income.
     t_total = max(0, (wages + taxable_ss + ltcg) - deduction)
     l_portion = max(0, t_total - t_ord_inc)  # amount taxed as LTCG
     ltcg_tax = 0
 
-    # max_ltcg_rate: The marginal tax rate of the highest capital gains bracket reached.
-    max_ltcg_rate = 0
+    # current_ltcg_rate: The marginal tax rate of the highest capital gains bracket reached.
+    current_ltcg_rate = 0
     for low, high, rate in c["ltcg"]:
         overlap = max(0, min(t_ord_inc + l_portion, high) - max(t_ord_inc, low))
         ltcg_tax += overlap * (rate / 100)
         if (t_ord_inc + l_portion) > low:
-            max_ltcg_rate = rate
+            current_ltcg_rate = rate
     
     # niit_tax: Calculated as 3.8% of the amount by which (Wages + LTCG) exceeds the NIIT threshold.
     niit_tax = max(0, (wages + ltcg - c["niit"]) * 0.038)  # Net Investment Income Tax if above threshold
 
-    return ord_tax, ltcg_tax, niit_tax, taxable_ss, max_ord_rate, max_ltcg_rate, sd_used
+    return ord_tax, ltcg_tax, niit_tax, taxable_ss, current_ord_rate, current_ltcg_rate, sd_used, deduction
 
 # --- STREAMLIT APP CONFIGURATION ---
 st.set_page_config(page_title="2026 Tax Analyzer", layout="wide")
@@ -145,9 +163,14 @@ is_senior = st.sidebar.checkbox("Is 65 or Older?", value=True)
 # Checkbox: show IRMAA lines on the main graph?
 show_irmaa = st.sidebar.checkbox("Show IRMAA Lines", value=True)
 
+use_std_deduction = st.sidebar.checkbox("Use Standard Deduction", value=True)
+itemized_deduction_input = 0
+if not use_std_deduction:
+    itemized_deduction_input = st.sidebar.number_input("Itemized Deduction ($)", value=20000, step=1000)
+
 # --- TAX CALCULATIONS FOR CURRENT SCENARIO ---
 # Compute taxes for sidebar metrics and graph
-ord_f, ltcg_f, niit_f, ss_f, ord_rate_f, ltcg_rate_f, sd_f = get_tax_details(wages, ltcg_input, ss_income, st_status, is_senior)
+ord_f, ltcg_f, niit_f, ss_f, ord_rate_f, ltcg_rate_f, sd_f, ded_f = get_tax_details(wages, ltcg_input, ss_income, st_status, is_senior, use_std_deduction, itemized_deduction_input)
 total_tax = ord_f + ltcg_f + niit_f  # total tax liability
 total_in = wages + ltcg_input + ss_income  # total income
 eff_rate = (total_tax / total_in * 100) if total_in > 0 else 0  # effective tax rate
@@ -161,9 +184,16 @@ st.sidebar.metric("Effective Tax Rate", f"{eff_rate:.1f}%")
 st.sidebar.markdown("---")
 # Additional sidebar details
 st.sidebar.write(f"**Taxable SS:** ${ss_f:,.0f} ({ss_percent:.1f}%)")
-st.sidebar.write(f"**Standard Deduction:** ${DATA_2026[st_status]['std']:,.0f}")
-st.sidebar.write(f"**Taxable Social Security:** ${ss_f:,.0f}")
-st.sidebar.write(f"**Senior Deduction Allowed:** ${sd_f:,.0f}")
+st.sidebar.write(f"**Deduction:** ${ded_f:,.0f}")
+
+senior_note = ""
+if is_senior and sd_f == 0:
+    if not use_std_deduction and ded_f == itemized_deduction_input:
+        senior_note = " (Itemized Used)"
+    else:
+        senior_note = " (Phased Out)"
+
+st.sidebar.write(f"**Senior Deduction Allowed:** ${sd_f:,.0f}{senior_note}")
 st.sidebar.write(f"**Capital Gains Marginal Rate:** {ltcg_rate_f:.0f}%")
 st.sidebar.write(f"**Capital Gains Effective Rate:** {((ltcg_f + niit_f)/ltcg_input*100 if ltcg_input > 0 else 0):.1f}%")
 
@@ -177,8 +207,8 @@ total_m_rates = []  # total marginal tax rates at each point
 
 # For each possible income, calculate marginal tax components for stacking
 for x in x_range:
-    o1, l1, n1, ss1, br1, lr1, sd1 = get_tax_details(x, ltcg_input, ss_income, st_status, is_senior)
-    o2, l2, n2, ss2, br2, lr2, sd2 = get_tax_details(x + delta, ltcg_input, ss_income, st_status, is_senior)
+    o1, l1, n1, ss1, br1, lr1, sd1, _ = get_tax_details(x, ltcg_input, ss_income, st_status, is_senior, use_std_deduction, itemized_deduction_input)
+    o2, l2, n2, ss2, br2, lr2, sd2, _ = get_tax_details(x + delta, ltcg_input, ss_income, st_status, is_senior, use_std_deduction, itemized_deduction_input)
     
     # Total marginal rate: difference in total tax
     total_m = ((o2 + l2 + n2) - (o1 + l1 + n1)) / delta * 100
