@@ -15,7 +15,8 @@ import numpy as np
 DATA_2026 = {
     "Single": {
         "std": 16100, 
-        "senior_deduction": 6500,
+        "senior_deduction": 6000,
+        "trad_senior": 1950,
         "ord": [(0, 12400, 10), (12400, 50400, 12), (50400, 105700, 22), (105700, 201775, 24), 
                 (201775, 256225, 32), (256225, 640600, 35), (640600, 9e9, 37)],
         "ltcg": [(0, 49450, 0), (49450, 545500, 15), (545500, 9e9, 20)],
@@ -26,7 +27,8 @@ DATA_2026 = {
     },
     "Married Filing Jointly": {
         "std": 32200,
-        "senior_deduction": 13000,
+        "senior_deduction": 12000,
+        "trad_senior": 3300, # $1650 * 2 spouses
         "ord": [(0, 24800, 10), (24800, 100800, 12), (100800, 211400, 22), (211400, 403550, 24), 
                 (403550, 512450, 32), (512450, 768700, 35), (768700, 9e9, 37)],
         "ltcg": [(0, 98900, 0), (98900, 613700, 15), (613700, 9e9, 20)],
@@ -51,7 +53,7 @@ if "wages" not in st.session_state:
     st.session_state["wages"] = 50000.0
 
 # --- TAX CALCULATION FUNCTION ---
-def get_tax_details(wages, ltcg, ss, status, senior, use_std_deduction, itemized_deduction):
+def get_tax_details(wages, ltcg, ss, status, senior, spouse_senior, use_std_deduction, itemized_deduction):
     """
     Compute all derived tax details for a given scenario.
 
@@ -61,6 +63,7 @@ def get_tax_details(wages, ltcg, ss, status, senior, use_std_deduction, itemized
         ss (float): Social Security annual income
         status (str): Filing status ("Single" or "Married Filing Jointly")
         senior (bool): Whether taxpayer is 65 or older
+        spouse_senior (bool): Whether spouse is 65 or older (only for MFJ)
         use_std_deduction (bool): True if using standard deduction.
         itemized_deduction (float): Value of itemized deductions if not using standard.
 
@@ -72,32 +75,60 @@ def get_tax_details(wages, ltcg, ss, status, senior, use_std_deduction, itemized
         current_ord_rate (float): Top ordinary marginal rate
         current_ltcg_rate (float): Top LTCG marginal rate
         sd_used (float): Senior deduction claimed
+        trad_sd_used (float): Traditional senior deduction claimed
         deduction (float): Total deduction used
     """
     c = DATA_2026[status]
 
-    # sd_used: The senior deduction value used, which may be reduced by a phase-out based on income.
-    # This is only applicable if taking the standard deduction.
-    potential_sd_used = 0
-    if senior:
+    # Determine number of seniors
+    num_seniors = 0
+    if senior: num_seniors += 1
+    if status == "Married Filing Jointly" and spouse_senior: num_seniors += 1
+
+    # Traditional Senior Deduction (Additional Standard Deduction)
+    trad_sd_potential = 0
+    if status == "Single":
+        trad_sd_potential = c["trad_senior"] if senior else 0
+    else:
+        # Married: Scaled by number of seniors ($1650 per person)
+        trad_sd_potential = num_seniors * (c["trad_senior"] / 2)
+
+    # OBBB Senior Deduction (potential value)
+    # This is available to both standard and itemized filers, and phases out with income.
+    obbb_sd_potential = 0
+    if num_seniors > 0:
+        # Base deduction depends on count for Married, fixed for Single
+        base_obbb_sd = c["senior_deduction"] if status == "Single" else num_seniors * (c["senior_deduction"] / 2)
         # 6% phase-out of the senior deduction above the threshold
         phase_out = max(0, (wages + ltcg - c["phaseout_start"]) * 0.06)
-        potential_sd_used = max(0, c["senior_deduction"] - phase_out)
+        obbb_sd_potential = max(0, base_obbb_sd - phase_out)
     
-    total_std_deduction = c["std"] + potential_sd_used
+    # Determine base deduction (Standard vs Itemized)
+    # The traditional senior deduction is part of the standard deduction.
+    base_std_deduction = c["std"] + trad_sd_potential
     
     sd_used = 0  # This will be the final value returned
+    trad_sd_used = 0
+
+    # The user gets the OBBB deduction regardless of their deduction choice.
+    sd_used = obbb_sd_potential
+
+    # Determine the base deduction (standard or itemized)
     if use_std_deduction:
-        deduction = total_std_deduction
-        sd_used = potential_sd_used
+        deduction = base_std_deduction
+        trad_sd_used = trad_sd_potential
     else:
-        # User is considering itemizing. They will take the greater of standard or itemized.
-        if itemized_deduction > total_std_deduction:
+        # User is considering itemizing. They will take the greater of their itemized
+        # deduction or the standard deduction as their base.
+        if itemized_deduction > base_std_deduction:
             deduction = itemized_deduction
-            sd_used = 0  # Itemizing, so no senior standard deduction is used.
+            trad_sd_used = 0
         else:
-            deduction = total_std_deduction
-            sd_used = potential_sd_used  # Taking standard deduction as it's higher.
+            deduction = base_std_deduction
+            trad_sd_used = trad_sd_potential
+
+    # The OBBB senior deduction is added on top of the chosen base deduction.
+    deduction += sd_used
 
     prov = wages + ltcg + (0.5 * ss)  # provisional income for SS taxation
     t1, t2 = c["ss_t"]
@@ -111,8 +142,8 @@ def get_tax_details(wages, ltcg, ss, status, senior, use_std_deduction, itemized
     
     # ord_tax: Calculated by applying ordinary income tax brackets to taxable ordinary income (Wages + Taxable SS - Deduction).
     t_ord_inc = max(0, (wages + taxable_ss) - deduction)  # taxed as ordinary income
-    ord_tax = 0
     
+    ord_tax = 0
     # current_ord_rate: The marginal tax rate of the highest ordinary income bracket reached.
     current_ord_rate = 0
     for low, high, rate in c["ord"]:
@@ -136,11 +167,99 @@ def get_tax_details(wages, ltcg, ss, status, senior, use_std_deduction, itemized
     # niit_tax: Calculated as 3.8% of the amount by which (Wages + LTCG) exceeds the NIIT threshold.
     niit_tax = max(0, (wages + ltcg - c["niit"]) * 0.038)  # Net Investment Income Tax if above threshold
 
-    return ord_tax, ltcg_tax, niit_tax, taxable_ss, current_ord_rate, current_ltcg_rate, sd_used, deduction
+    return ord_tax, ltcg_tax, niit_tax, taxable_ss, t_ord_inc, current_ord_rate, current_ltcg_rate, sd_used, trad_sd_used, deduction
 
 # --- STREAMLIT APP CONFIGURATION ---
 st.set_page_config(page_title="2026 Tax Analyzer", layout="wide")
 st.title("2026 Marginal Tax Analyzer")
+
+# --- CUSTOM CSS ---
+st.markdown("""
+    <style>
+    [data-testid="stSidebar"] [data-testid="stExpander"] details {
+        border: none;
+        box-shadow: none;
+        background-color: transparent;
+        padding: 0;
+    }
+    
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {
+        flex-wrap: nowrap;
+        align-items: center;
+    }
+        
+    [data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div {
+        min-width: 0;
+        flex: 1 1 0;
+    }
+            
+    /* Styles the clickable bar and the "disclosure triangle." */
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {
+        padding-left: 0;
+        padding-top: 0.50rem;
+        padding-bottom: 0.00rem;
+        margin-bottom: 0.00rem;
+        margin-top: 0.00rem;
+    }
+    
+    /* This controls the spacing of text in the title of the expander */
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary p {
+        font-size: 1rem;
+        font-weight: 600;
+        padding-top: 0.50rem;
+        padding-bottom: 0.50rem;
+        margin-bottom: -0.50rem;
+        margin-top: 0.00rem;
+    }
+
+    /* This controls the spacing of text inside the expander */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpanderDetails"] p {
+        font-size: 0.85rem;
+        margin-bottom: 0.50rem;
+    }
+            
+    /* Reduce spacing between all sidebar elements */
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div {
+        margin-bottom: -0.50rem;
+    }
+
+    /* Specifically target checkboxes */
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] {
+        margin-bottom: -0.25rem;
+    }
+
+    /* Specifically target text/write elements */
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+        margin-bottom: 0.50rem;
+    }
+    
+    /* Horizontal Rule - Divider */
+    [data-testid="stSidebar"] hr {
+        margin-top: 0.50rem;
+        margin-bottom: 0.50rem;
+        padding-top: 0.00rem;
+        padding-bottom: 0.00rem;
+
+    }
+
+    /* Header 3 */       
+    [data-testid="stSidebar"] h3 {
+        margin-top: 0.5rem;
+        margin-bottom: 0.25rem;
+        padding-top: 0rem;
+        padding-bottom: 1.00rem;
+    }
+    
+    /* Header 2   */        
+    [data-testid="stSidebar"] h2 {
+            margin-top: 0rem;
+            margin-bottom: -0.25rem;
+            padding-top: 0rem;
+            padding-bottom: 0.00rem;
+    }
+    
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- SIDEBAR INPUTS ---
 st.sidebar.header("Income Parameters")
@@ -159,7 +278,16 @@ ltcg_input = st.sidebar.number_input("Capital Gains ($)", value=20000, step=1000
 
 ss_income = st.sidebar.number_input("Annual Social Security ($)", value=40000, step=1000)
 # Checkbox: is the filer 65+?
-is_senior = st.sidebar.checkbox("Is 65 or Older?", value=True)
+is_spouse_senior = False
+if st_status == "Married Filing Jointly":
+    col1, col2 = st.sidebar.columns(2)
+    with col1:
+        is_senior = st.checkbox("HoH 65+", value=True)
+    with col2: 
+        is_spouse_senior = st.checkbox("Spouse 65+", value=True)
+else:
+    is_senior = st.sidebar.checkbox("Head of Household 65+", value=True)
+
 # Checkbox: show IRMAA lines on the main graph?
 show_irmaa = st.sidebar.checkbox("Show IRMAA Lines", value=True)
 
@@ -170,7 +298,7 @@ if not use_std_deduction:
 
 # --- TAX CALCULATIONS FOR CURRENT SCENARIO ---
 # Compute taxes for sidebar metrics and graph
-ord_f, ltcg_f, niit_f, ss_f, ord_rate_f, ltcg_rate_f, sd_f, ded_f = get_tax_details(wages, ltcg_input, ss_income, st_status, is_senior, use_std_deduction, itemized_deduction_input)
+ord_f, ltcg_f, niit_f, ss_f, taxable_ord_inc, ord_rate_f, ltcg_rate_f, obbb_sd_f, trad_sd_f, ded_f = get_tax_details(wages, ltcg_input, ss_income, st_status, is_senior, is_spouse_senior, use_std_deduction, itemized_deduction_input)
 total_tax = ord_f + ltcg_f + niit_f  # total tax liability
 total_in = wages + ltcg_input + ss_income  # total income
 eff_rate = (total_tax / total_in * 100) if total_in > 0 else 0  # effective tax rate
@@ -179,27 +307,53 @@ ss_percent = (ss_f / ss_income * 100) if ss_income > 0 else 0  # percent of SS t
 # --- SIDEBAR RESULTS & METRICS ---
 st.sidebar.markdown("---")
 st.sidebar.subheader("Tax Analysis")
-st.sidebar.metric("Total Tax Liability", f"${total_tax:,.0f}")
-st.sidebar.metric("Effective Tax Rate", f"{eff_rate:.1f}%")
+#st.sidebar.metric("**Total Tax Liability**", f"${total_tax:,.0f}")
+#st.sidebar.metric("**Effective Tax Rate**", f"{eff_rate:,.1f}%")
+st.sidebar.write("**Total Tax Liability**", f"${total_tax:,.0f}")
+st.sidebar.write("**Effective Tax Rate**", f"{eff_rate:,.1f}%")
 st.sidebar.markdown("---")
+
 # Additional sidebar details
-st.sidebar.write(f"**Taxable SS:** ${ss_f:,.0f} ({ss_percent:.1f}%)")
 
-senior_note = ""
-if is_senior and sd_f == 0:
-    if not use_std_deduction and ded_f == itemized_deduction_input:
-        senior_note = " (Itemized Used)"
+base_std = DATA_2026[st_status]["std"]
+
+with st.sidebar.expander(f"**Total Deduction:** ${ded_f:,.0f}") :
+    # 1: Standard or Itemized
+    if use_std_deduction:
+        st.write(f"**Standard Deduction:** ${base_std:,.0f}")
     else:
-        senior_note = " (Phased Out)"
+        st.write(f"**Itemized Deduction:** ${itemized_deduction_input:,.0f}")
+    
+    # 2: Traditional Senior Deduction
+    if trad_sd_f > 0:
+        st.write(f"**Senior Deduction:** ${trad_sd_f:,.0f}")
+    else:
+        st.write("**Senior Deduction:** Not Eligible")
 
-st.sidebar.write(f"**Senior Deduction Allowed:** ${sd_f:,.0f}{senior_note}")
-st.sidebar.write(f"**Total Deduction:** ${ded_f:,.0f}")
+    # 3: OBBB Senior Deduction
+    if is_senior or is_spouse_senior:
+        if obbb_sd_f > 0:
+            st.write(f"**OBBB Senior Deduction:** ${obbb_sd_f:,.0f}")
+        elif use_std_deduction:
+            st.write("**OBBB Senior Deduction:** Phased Out")
+    else:
+        st.write("**OBBB Senior Deduction:** Not Eligible")
+st.sidebar.markdown("---")
+
+with st.sidebar.expander(f"**Taxable Income:** ${taxable_ord_inc:,.0f}") :
+        st.write(f"**Ordinary Income:** ${wages:,.0f}")
+        st.write(f"**Taxable SS:** ${ss_f:,.0f} ({ss_percent:.1f}%)")
+        st.write(f"**Total Deduction:** $-{ded_f:,.0f}")
+
+print(f"Taxable Income: ${taxable_ord_inc:.0f}")
+st.sidebar.markdown("---")
+    
 st.sidebar.write(f"**Capital Gains Marginal Rate:** {ltcg_rate_f:.0f}%")
-st.sidebar.write(f"**Capital Gains Effective Rate:** {((ltcg_f + niit_f)/ltcg_input*100 if ltcg_input > 0 else 0):.1f}%")
+st.sidebar.write(f"**Capital Gains Effective Rate:** {((ltcg_f + niit_f)/ltcg_input*100 if ltcg_input > 0 else 0):.0f}%")
 
 # --- DATA GENERATION FOR PLOT ---
 # Determine X range for plotting
-max_x = max(wages * 1.5, 100000)  # set x-axis maximum
+max_x = max(wages * 1.5, 150000, (wages+ltcg_input)*1.2)  # set x-axis maximum
 x_range = np.linspace(0, max_x, 800)  # points to plot, covers wide income span
 delta = 1.0  # increment to calculate marginal rates
 stack_data = []  # all stacked marginal contributions for plotting
@@ -207,8 +361,8 @@ total_m_rates = []  # total marginal tax rates at each point
 
 # For each possible income, calculate marginal tax components for stacking
 for x in x_range:
-    o1, l1, n1, ss1, br1, lr1, sd1, _ = get_tax_details(x, ltcg_input, ss_income, st_status, is_senior, use_std_deduction, itemized_deduction_input)
-    o2, l2, n2, ss2, br2, lr2, sd2, _ = get_tax_details(x + delta, ltcg_input, ss_income, st_status, is_senior, use_std_deduction, itemized_deduction_input)
+    o1, l1, n1, ss1, ti1,br1, lr1, sd1, _, _ = get_tax_details(x, ltcg_input, ss_income, st_status, is_senior, is_spouse_senior, use_std_deduction, itemized_deduction_input)
+    o2, l2, n2, ss2, ti2,br2, lr2, sd2, _, _ = get_tax_details(x + delta, ltcg_input, ss_income, st_status, is_senior, is_spouse_senior, use_std_deduction, itemized_deduction_input)
     
     # Total marginal rate: difference in total tax
     total_m = ((o2 + l2 + n2) - (o1 + l1 + n1)) / delta * 100
@@ -216,7 +370,7 @@ for x in x_range:
     niit_m = (n2 - n1) / delta * 100  # marginal NIIT rate
     ss_m = ((ss2 - ss1) / delta) * (br1 / 100) * 100  # impact of SS portion
     ltcg_m = (l2 - l1) / delta * 100  # marginal LTCG rate
-    senior_m = ((sd1 - sd2) * (br1 / 100)) / delta * 100 if is_senior else 0  # marginal senior deduction loss
+    senior_m = ((sd1 - sd2) * (br1 / 100)) / delta * 100 if (is_senior or is_spouse_senior) else 0  # marginal senior deduction loss
     ord_m = max(0, total_m - niit_m - ss_m - ltcg_m - senior_m)  # remainder is ordinary marginal rate
     
     stack_data.append((ord_m, ltcg_m, ss_m, senior_m, niit_m))
@@ -243,8 +397,8 @@ step_indices.append(len(total_m_rates)-1)  # always end
 for i in range(len(step_indices)-1):
     start, end = step_indices[i], step_indices[i+1]
     mid = (start + end) // 2
-    # Only label brackets wider than 5% of the graph width
-    if (x_range[end] - x_range[start]) > (max_x * 0.05):
+    # Only label brackets wider than 3% of the graph width
+    if (x_range[end] - x_range[start]) > (max_x * 0.03):
         rate = total_m_rates[mid]
         ax.text(x_range[mid], rate + 1, f"{rate:.1f}%", 
                 ha='center', fontweight='bold', fontsize=9,
@@ -257,6 +411,17 @@ ax.text(
     ha='center', va='bottom', color='black', fontsize=9, fontweight='bold',
     bbox=dict(facecolor='white', alpha=0.7, edgecolor='black', pad=2)
 )
+
+# Vertical line at taxable income# taxed as ordinary income
+#ax.axvline(taxable_ord_inc, color='black', lw=2, ls='--')
+#ax.text(
+#    taxable_ord_inc, 2, f"Taxable\n${taxable_ord_inc:,.0f}",
+#    ha='center', va='bottom', color='black', fontsize=9, fontweight='bold',
+#    bbox=dict(facecolor='white', alpha=0.7, edgecolor='black', pad=2)
+#)
+
+
+
 
 # --- Graph styling ---
 ax.set_ylim(0, 60)
